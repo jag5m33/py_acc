@@ -1,0 +1,983 @@
+================================================================================
+US ACCIDENTS (2016-2023) — FULL EDA WALKTHROUGH
+Stage 1 and Stage 2, step by step: what was tested, what came back,
+what it means, and what it led to next.
+================================================================================
+
+Question:  What weather, time-of-day and road features best predict whether an
+           accident will be severe, so authorities can target warnings and
+           resources?
+Target:    severity, 1-4, measuring the effect on traffic delay
+Dataset:   Kaggle US Accidents, US_Accidents_March23.csv, 7,728,394 rows,
+           46 columns
+
+
+################################################################################
+STAGE 1 — PROFILE EVERY COLUMN ON ITS OWN
+################################################################################
+
+Purpose: understand what each column contains before asking what it predicts.
+Nothing here is about severity. It is about knowing the data.
+
+
+--------------------------------------------------------------------------------
+1.1  Structure and memory
+--------------------------------------------------------------------------------
+TESTED    df.info(), dtypes, shallow vs deep memory usage.
+
+RESULT    7,728,394 rows, 46 columns.
+          79% of memory is hidden in object (string) columns.
+          Index is a plain RangeIndex — a row counter, not meaningful data.
+
+MEANING   The dataset is large enough that every operation costs time, and most
+          of the weight is in text columns that will mostly be dropped or
+          converted. Sampling will be needed for plotting.
+
+NEXT      Split the columns into numerical and categorical and profile each
+          group separately.
+
+
+--------------------------------------------------------------------------------
+1.2  Numerical summary statistics
+--------------------------------------------------------------------------------
+TESTED    df.describe() on the numerical columns, then extreme percentiles
+          (99% and 99.99%).
+
+RESULT    Comparing the 50%, 75% and max values showed distance, temperature,
+          wind chill, pressure, visibility, wind speed and precipitation all
+          have maxima far beyond their 75th percentile.
+
+MEANING   Several columns contain values that are not just outliers but
+          physically impossible. Those have to be identified individually,
+          because summary statistics alone cannot tell an extreme-but-real
+          value from a broken one.
+
+NEXT      Plot them, and build an explicit audit of which columns have a
+          trustworthy mean.
+
+
+--------------------------------------------------------------------------------
+1.3  Boxplots and histograms on a 100k sample
+--------------------------------------------------------------------------------
+TESTED    Random 100,000-row sample (random_state=42), boxplots and 100-bin
+          histograms of every numerical column.
+
+RESULT    Visual confirmation of heavy skew in distance, precipitation, wind
+          speed and pressure. Severity appears as four discrete bars dominated
+          by 2.
+
+MEANING   A random sample is fine for seeing the SHAPE of a distribution. It
+          must not be used for reported statistics.
+
+          Also established: at 7.7m rows the IQR rule flags millions of
+          legitimate points, so outliers must be judged against PHYSICAL
+          LIMITS, not boxplot whiskers.
+
+NEXT      Quantify the skew rather than eyeballing it.
+
+
+--------------------------------------------------------------------------------
+1.4  Skew and kurtosis
+--------------------------------------------------------------------------------
+TESTED    .skew() and .kurtosis() on every numerical column.
+
+RESULT    Precipitation(in)   skew 10,710
+          Wind_Speed(mph)     skew  1,085
+          Distance(mi)        skew  1,649
+          Visibility(mi)      skew     82
+          Pressure(in)        skew     22
+          Humidity(%)         skew  -0.72  (LEFT skewed)
+          Temperature(F)      skew  -0.00
+
+MEANING   These numbers are the REASON the audit function flags the mean as
+          unsafe for those columns. A skew in the thousands means a handful of
+          values are dragging the mean far from anything typical.
+
+          Correction made during the analysis: humidity and temperature are
+          LEFT-skewed — the tail is on the left, not the right.
+
+NEXT      Formalise it: which columns can use the mean, which must use the
+          median.
+
+
+--------------------------------------------------------------------------------
+1.5  The audit_cols function
+--------------------------------------------------------------------------------
+TESTED    Custom function comparing mean, median, p75, p99.99 and max for each
+          numerical column, returning a verdict.
+
+RESULT    Columns split into "use MEAN (safe)" and "median must be used, mean
+          is likely biased".
+
+MEANING   A reusable, explicit rule rather than a judgement call per column.
+          Useful later for deciding imputation strategy — you impute with the
+          median where the mean is unsafe.
+
+NEXT      Identify the specific impossible values.
+
+
+--------------------------------------------------------------------------------
+1.6  Impossible and censored values
+--------------------------------------------------------------------------------
+TESTED    Value ranges against physical limits.
+
+RESULT    temperature       -90 and 160 F — both impossible
+          wind_chill        same problem, probably the same rows
+          pressure          values of 2 and 3 (anything below ~15 is impossible)
+          wind_speed        a point at ~820 mph
+          visibility        a spike at exactly 10
+          precipitation     over 75% of non-missing values are exactly 0
+
+MEANING   Most are straightforward errors. Visibility is different: the spike
+          at 10 is not a placeholder, it is AIRPORT CENSORING — the station
+          reports "10 or greater" as 10. The value is real but capped.
+
+          Later question raised and resolved: could some temperatures be in
+          Celsius? No — -90 and 160 are impossible in either unit. A genuine
+          C/F mix would hide inside the normal range and would need checking
+          by place and season, not by looking at extremes.
+
+NEXT      Note them for Stage 3 and move on to the categorical columns.
+
+
+--------------------------------------------------------------------------------
+1.7  Categorical columns — missingness and cardinality
+--------------------------------------------------------------------------------
+TESTED    isna().sum() and nunique() across all non-numeric columns.
+
+RESULT    weather_condition  173,459 missing
+          wind_direction     175,206 missing
+          weather_timestamp  120,228 missing
+          airport_code        22,635 missing
+          street              10,869 missing
+          timezone             7,808 missing
+
+MEANING   The weather-related columns cluster in their missingness, which
+          suggests a shared cause rather than seven independent problems.
+
+NEXT      Profile each categorical column individually.
+
+
+--------------------------------------------------------------------------------
+1.8  source
+--------------------------------------------------------------------------------
+TESTED    unique values and proportions.
+
+RESULT    Source1 ~4.3m, Source2 ~3.3m, Source3 ~0.1m (about 1%).
+          Converted to category dtype.
+
+MEANING   Three providers, very unevenly sized. Noted at the time that Source3
+          is tiny and any pattern in it should be treated cautiously.
+
+NEXT      (This column became the single most important one in Stage 2 —
+          see 2.6.)
+
+
+--------------------------------------------------------------------------------
+1.9  country and turning_loop — dropped
+--------------------------------------------------------------------------------
+TESTED    value_counts on both.
+
+RESULT    country: 100% USA. turning_loop: 100% False (nunique = 1).
+
+MEANING   A column with one value carries zero information. Nothing can be
+          learned from a constant.
+
+NEXT      Dropped both, rebuilt the categorical column list.
+
+
+--------------------------------------------------------------------------------
+1.10  wind_direction
+--------------------------------------------------------------------------------
+TESTED    value_counts before and after cleaning.
+
+RESULT    Duplicated encodings found: "North" and "N", "West" and "W", etc.
+          After merging to 16 compass points:
+             CALM 17.21%, S 7.73%, W 7.10%, N 5.96%, ... NA 2.27%
+
+MEANING   Same direction recorded two ways is the same class-splitting problem
+          that later appeared with clear/fair in weather. The cleaning is
+          simple; the lesson is that this dataset mixes vocabularies.
+
+OUTSTANDING  VAR and VARIABLE are still split into two categories.
+             CALM should line up with wind_speed = 0 — checked later.
+
+NEXT      timezone, then the road features.
+
+
+--------------------------------------------------------------------------------
+1.11  timezone
+--------------------------------------------------------------------------------
+TESTED    value_counts.
+
+RESULT    7 values where there should be 4 — the same zones written two ways.
+          Cleaned to eastern / central / mountain / pacific and renamed.
+
+MEANING   Third instance of the same problem. A pattern is now visible.
+
+NEXT      Road features.
+
+
+--------------------------------------------------------------------------------
+1.12  The twelve boolean road features
+--------------------------------------------------------------------------------
+TESTED    True/False percentage for each.
+
+RESULT    traffic_signal   14.80% True
+          crossing         11.31%
+          junction          7.39%
+          stop              2.77%
+          station           2.61%
+          amenity           1.25%
+          railway           0.87%
+          give_way          0.47%
+          no_exit           0.25%
+          traffic_calming   0.098%
+          bump              0.045%
+          roundabout        0.0032%
+
+MEANING   Six features are True in under 1% of rows. Any conclusion about them
+          will rest on a small sample, so row counts matter more than
+          percentages for these.
+
+NEXT      The four light columns.
+
+
+--------------------------------------------------------------------------------
+1.13  The four light columns and light_score
+--------------------------------------------------------------------------------
+TESTED    Crosstabs of sunrise_sunset against astronomical_twilight, and
+          civil_twilight against nautical_twilight.
+
+RESULT    sunrise_sunset Day / astronomical Night   = 0.00
+          sunrise_sunset Night / astronomical Day   = 0.14
+          civil Night / nautical Day                = 0.05
+
+MEANING   The four columns are nested, not independent. They rank by how strict
+          each one is about when day ends. Astronomical twilight is the
+          strictest — the last to call it night. If sunrise_sunset says Day,
+          all four say Day.
+
+          So they can be summed into a single ordinal score without losing
+          information:
+              Day = 0, Night = 1, summed across the four
+              light_score 0 = full daylight ... 4 = full darkness
+
+RESULT    light_score distribution: 0 (day) ~5.3m, 4 (full night) ~1.3m,
+          1-3 (twilight) ~0.3-0.4m each.
+          About 44% of non-daylight accidents happen during twilight.
+
+          23,246 rows have NO light value.
+
+NEXT      Investigate those 23,246 rows.
+
+
+--------------------------------------------------------------------------------
+1.14  The 23,246 all-missing rows
+--------------------------------------------------------------------------------
+TESTED    Whether the missing light values fall on the same rows as other
+          missing values.
+
+RESULT    Those 23,246 rows are ALSO missing precipitation, wind chill, city,
+          and end lat/lng.
+
+MEANING   Not 23,246 separate problems — one problem affecting 23,246 rows.
+          Probably a batch of records that failed enrichment entirely.
+          Small enough (0.3%) to drop in Stage 3.
+
+NEXT      Time columns.
+
+
+--------------------------------------------------------------------------------
+1.15  Time columns and duration
+--------------------------------------------------------------------------------
+TESTED    Converted start_time, end_time and weather_timestamp from string to
+          datetime. Computed time_delta = end - start.
+
+RESULT    Duration skew ~50, kurtosis ~3,660.
+          Log-scale histogram shows SHARP SPIKES at approximately 30, 45, 60,
+          90, 120 and 360 minutes.
+          Bulk of the data sits between ~10 minutes and ~17 hours.
+          Thin tail extending to about 2 years.
+
+MEANING   Spikes at round numbers are the tell. Real clearance times would form
+          a smooth distribution. These are DEFAULT VALUES assigned by the
+          provider, not measured durations.
+
+          The 2-year tail is broken records.
+
+          More importantly: duration is LEAKAGE. It is only known after the
+          incident clears, and it is essentially a measurement of the thing
+          being predicted.
+
+NEXT      Geographic columns.
+
+
+--------------------------------------------------------------------------------
+1.16  zipcode, street, city, county — dropped
+--------------------------------------------------------------------------------
+TESTED    nunique() on each; groupby to check whether city and county names
+          repeat across states.
+
+RESULT    zipcode  825,294 unique, against roughly 42,000 real US zipcodes
+          street   336,306 unique
+          city and county names repeat across multiple states
+
+MEANING   zipcode: the count is 20x too high because the column mixes 5-digit
+          and ZIP+4 formats. Would also need checking for lost leading zeros.
+          Not worth repairing when lat/lng already give exact location.
+
+          city and county: ambiguous on their own, and redundant given state
+          plus coordinates.
+
+          The deeper reason for dropping all of them is CARDINALITY. Hundreds
+          of thousands of categories cannot be learned from; the model would
+          memorise individual streets rather than generalise.
+
+DECISION  Dropped county, city, zipcode. Kept street only long enough to
+          extract road type from it.
+
+NEXT      Extract something usable from street.
+
+
+--------------------------------------------------------------------------------
+1.17  street_type, extracted from street
+--------------------------------------------------------------------------------
+TESTED    Keyword extraction of road class from the street name.
+
+          First version had four bugs: returned the wrong column; "St" and "Dr"
+          matched inside words like "West" and "Stone"; .str.title() broke the
+          "US-" key; missing streets defaulted to Local; and a duplicate
+          dictionary key.
+
+          Rewritten to lower-case the text, use \b word boundaries, and apply
+          np.select with conditions ordered from highest road class down.
+
+RESULT    Labels: Unknown / Interstate / US Highway / State Highway / Freeway /
+          County Road / Local / Other.
+
+          Verified on test cases: "I-5 N" -> Interstate, "US-101" -> US Highway,
+          "West Ave" -> Local, "Stone Rd" -> Local, "Katy Fwy" -> Freeway,
+          "CA-1" -> State Highway, "Broadway" -> Other, None -> Unknown.
+
+          Distribution: Local ~44%, Interstate ~25%, State Highway ~13%,
+          Freeway ~10%, US Highway ~3.8%, Other ~3.4%, Unknown ~0.14%.
+
+MEANING   336,306 useless categories reduced to 8 usable ones.
+
+NEXT      airport_code.
+
+
+--------------------------------------------------------------------------------
+1.18  airport_code
+--------------------------------------------------------------------------------
+TESTED    Missingness, and its relationship to the weather columns.
+
+RESULT    22,635 missing.
+
+MEANING   This column is not geography. It is the WEATHER STATION the weather
+          readings were copied from — provenance, not location.
+
+          That single insight explains two things at once:
+            - the visibility ceiling at exactly 10 (airport reporting convention)
+            - probably most of the weather missingness: if an accident could not
+              be matched to a station (too remote, station offline, no report
+              near that time) then no weather was copied in
+
+HYPOTHESIS   Rows missing airport_code should also be missing their weather. If
+             true, one cause explains several gaps instead of seven.
+
+NEXT      weather_condition.
+
+
+--------------------------------------------------------------------------------
+1.19  weather_condition
+--------------------------------------------------------------------------------
+TESTED    Converted to lower case, stripped whitespace, counted unique values
+          and cumulative coverage.
+
+RESULT    145 distinct values, 144 after stripping.
+          The TOP 13 cover 95% of all rows.
+          The remaining 132 categories share the last 5%.
+
+MEANING   A long tail of 132 categories is too sparse to estimate anything
+          from reliably.
+
+          More importantly, the column encodes FOUR INDEPENDENT THINGS in one
+          text field:
+             precipitation type   (rain, snow, sleet)
+             intensity            (light, heavy)
+             obscuration          (fog, haze, smoke)
+             wind and thunder     (windy, blowing, thunder)
+
+          One-hot encoding 145 categories would be wrong. The right approach is
+          keyword-matched binary flags plus an ordinal intensity, which lets one
+          row carry several facts at once.
+
+TRAPS NOTED FOR THE KEYWORD MATCHING
+             "funnel cloud" is a tornado precursor, not cloudiness
+             "n/a precipitation" is a missing marker, not weather
+             "in the vicinity" / "nearby" means weather NOT at the accident site
+             "drifting" implies wind
+             squalls are not thunder
+
+NEXT      The target itself.
+
+
+--------------------------------------------------------------------------------
+1.20  severity (the target)
+--------------------------------------------------------------------------------
+TESTED    value_counts as percentages.
+
+RESULT    1:  under 1%
+          2:  ~80%
+          3:  ~17%
+          4:  ~2.6%
+
+MEANING   Heavily imbalanced. Accuracy is a useless metric: predicting "not
+          severe" for everything would score 80%.
+
+          Class 1 is too rare to model on its own. Class 4 at 2.6% is also
+          thin.
+
+DECISION  Collapse to a binary target:
+             severe     = 3 or 4  (19.46%)
+             not severe = 1 or 2  (80.54%)
+          Note the 1s and 2s are not discarded — they are the denominator of
+          every percentage in Stage 2.
+
+NEXT      state and the remaining bar charts.
+
+
+--------------------------------------------------------------------------------
+1.21  state
+--------------------------------------------------------------------------------
+TESTED    Accident counts by state.
+
+RESULT    California ~1.74m, Florida ~0.88m, Texas ~0.58m, then South Carolina,
+          New York, North Carolina.
+          Several states (VT, WY, SD) have very few rows.
+
+          This CORRECTED an earlier note in the notebook claiming Florida was
+          highest.
+
+MEANING   Raw counts reflect population and data coverage, not risk. To say
+          anything about risk you need % severe, not counts.
+
+NEXT      Duplicates.
+
+
+--------------------------------------------------------------------------------
+1.22  Duplicate rows
+--------------------------------------------------------------------------------
+TESTED    df.duplicated(subset = all columns except id), with keep=False then
+          keep='first'.
+
+RESULT    keep=False   274,144 rows sit in duplicate groups
+          keep='first' 140,811 extra copies
+          Therefore 133,333 distinct records behind them
+          Average group size 2.06 — almost all are pairs
+
+MEANING   1.8% of the data is duplicated. Pairs point to double submission of
+          the same record, not a systematic feed fault.
+
+          They must be removed BEFORE the train/test split. If one copy lands
+          in train and its twin in test, the model is scored on a row it has
+          already memorised, and the test score comes out falsely high.
+
+OUTSTANDING  Re-run on the original column set (some columns have since been
+             dropped, which could inflate the count), and check source and year
+             within the groups.
+
+NEXT      Save a checkpoint and begin Stage 2.
+
+
+--------------------------------------------------------------------------------
+1.23  Leakage columns identified
+--------------------------------------------------------------------------------
+TESTED    For each column: would a dispatcher have this number at the moment
+          the crash happens?
+
+RESULT    end_time        when the disruption cleared — no
+          time_delta      how long it lasted — no
+          end_lat/end_lng where along the road the impact reached — no
+          distance(mi)    how far it spread (end minus start) — no
+          description     written after the event — no
+
+MEANING   All five measure the SIZE OF THE DISRUPTION, in time or in space,
+          either as a raw endpoint or as a difference from the start. Severity
+          IS the size of the disruption. Using them would mean predicting
+          severity from a measurement of severity.
+
+          distance(mi) specifically is the length of road affected, not the
+          distance any vehicle travelled. The spike at 0 makes sense on that
+          reading.
+
+DECISION  Excluded as features. May be used to VALIDATE the target — severe
+          accidents should last longer and affect more road — but never as
+          inputs.
+
+
+--------------------------------------------------------------------------------
+1.24  Environment issue (resolved)
+--------------------------------------------------------------------------------
+PROBLEM   pd.read_parquet failed with ArrowKeyError, then "type extension
+          already defined" on retry.
+
+CAUSE     A pandas/pyarrow version clash failing inside get_engine() before the
+          file is even opened. Not a problem with the file.
+          (The first diagnosis — a pickled object column — was wrong.)
+
+FIX       Upgrade pandas or pin pyarrow<21, then RESTART THE KERNEL. The broken
+          half-setup persists in memory otherwise.
+          In-session workaround: pq.read_table(path).to_pandas()
+
+SIDE      Parquet restores the index properly, so the "Unnamed: 0" artefact
+EFFECT    from the CSV no longer appears.
+
+
+################################################################################
+STAGE 2 — RELATIONSHIPS: DOES THIS COLUMN CHANGE THE CHANCE OF SEVERITY?
+################################################################################
+
+METHOD
+    Baseline = % severe across all rows. Whole dataset: 19.5%.
+    Single-column test: filter to one value, recompute % severe, compare to
+    the baseline.
+    Split test: repeat that comparison INSIDE each value of a suspected
+    confounder. In a split you compare the two cells in the same ROW of the
+    table, not against the overall baseline.
+        gap survives    -> real effect
+        gap disappears  -> the link belonged to the other column
+    At 3-7 million rows everything is statistically significant. Judge by the
+    SIZE of the gap, never by p-values.
+
+
+--------------------------------------------------------------------------------
+2.1  Setup
+--------------------------------------------------------------------------------
+TESTED    Extracted start_year, start_hour, start_day (0=Mon), start_month
+          from start_time. Re-applied street_type_shift.
+
+NEXT      Start with weather, since it is the central question.
+
+
+--------------------------------------------------------------------------------
+2.2  Weather, first attempt (full dataset)
+--------------------------------------------------------------------------------
+TESTED    Keyword search on weather_condition, % severe per keyword group.
+
+RESULT    overcast 34.95   clear 33.56   rain 23.35   snow 20.04
+          haze 19.93       cloud 19.82   fog 13.07    fair 11.72
+
+THE ANOMALY
+          "clear" and "fair" describe the same sky. Gap: 21.8 points.
+          "overcast" and "cloudy" describe the same sky. Gap: 15.1 points.
+
+MEANING   Different weathers SHOULD differ — snow versus fog is a real
+          difference and a gap there is a finding. SYNONYMS should not, because
+          there is no weather difference between them, only a difference in
+          wording. A 21.8-point gap between two words for the same condition
+          cannot have been caused by weather.
+
+          Analogy: two thermometers in one room reading 20C and 68F is fine —
+          same temperature, different scale. One reading 20C and the other 35C
+          means an instrument is broken. This is a check on the instrument.
+
+SECOND WARNING
+          snow came out at 20.04% against a 19.5% baseline — no effect at all.
+          Snow having no influence on accident severity is not believable.
+
+NEXT      Find what is attached to the choice of word.
+
+
+--------------------------------------------------------------------------------
+2.3  weather_condition crossed with source and year
+--------------------------------------------------------------------------------
+TESTED    Crosstab of the four words against source and start_year.
+
+RESULT    Source1 "clear":  58,195 (2018) -> 13,451 (2019) -> 0 from 2020
+          Source1 "fair":      862 (2018) -> 99,455 (2019) -> 749,567 (2022)
+          Same switch for overcast -> cloudy.
+          Zero rows of clear or overcast after 2019 in ALL THREE sources.
+
+MEANING   The vocabulary switches at the end of 2019, simultaneously across all
+          three sources. That rules out the accident providers: if Source1 had
+          changed its own wording, Sources 2 and 3 would be unaffected.
+
+          A change hitting all three at once points at something shared — the
+          WEATHER DATA SUPPLIER used to attach readings to accidents.
+
+          So: "clear" effectively means "accident from 2016-2019"
+              "fair"  effectively means "accident from 2020-2023"
+          The 21.8-point gap was measuring WHEN, not WHAT.
+
+NEXT      If those words mark eras and show different severity, severity itself
+          must differ by era. Check immediately — it would affect every column.
+
+
+--------------------------------------------------------------------------------
+2.4  % severe by year  — THE TURNING POINT
+--------------------------------------------------------------------------------
+TESTED    groupby start_year, % severe.
+
+RESULT    2016  34.2      2020  18.4
+          2017  35.6      2021  11.4
+          2018  35.6      2022   6.9
+          2019  27.9      2023   2.9
+
+MEANING   A TWELVEFOLD DECLINE. Flat for three years, then falling every year
+          after. Accidents did not become twelve times less disruptive. The
+          LABEL changed.
+
+          Three consequences:
+            1. The 19.5% baseline is an average over regimes that never
+               coexisted. It is not a meaningful "typical" rate.
+            2. Any column whose prevalence shifted over time inherits the year
+               effect for free. Recent years hold far more rows, so anything
+               more common recently looks artificially safe.
+            3. A model trained on this learns "older record = severe" — a fact
+               about the filing system, useless for prediction.
+
+          The clear/fair anomaly was the first symptom. There would have been
+          more.
+
+NEXT      Is this the whole dataset, or particular providers?
+
+
+--------------------------------------------------------------------------------
+2.5  % severe by source AND year
+--------------------------------------------------------------------------------
+TESTED    groupby [source, start_year], % severe.
+
+RESULT    Year    Source1   Source2   Source3
+          2016     28.4      36.8      47.5
+          2017     32.3      36.4      47.2
+          2018     33.4      36.0      48.6
+          2019     21.0      30.3      36.3
+          2020     10.2      30.6      29.7
+          2021      2.4      34.3      19.5
+          2022      2.7      34.5      22.5
+          2023      2.9       -         -
+
+MEANING   Four separate things in one table:
+            (a) The three sources disagreed with each other even in 2016 —
+                28.4 vs 36.8 vs 47.5. They were never using one standard.
+            (b) Source1 collapses thirteenfold. Its own grading changed.
+            (c) Source3 drifts down more gently.
+            (d) Source2 is STABLE, 30-37%, across all seven years.
+            (e) All three step down in 2019, matching the weather-supplier
+                change — so something about the dataset's construction also
+                changed that year.
+
+          Because Source2 stays flat while Source1 collapses, there was no
+          industry-wide change of standards. Individual providers changed how
+          they applied the label, at different times and by different amounts.
+
+NEXT      Decision point.
+
+
+--------------------------------------------------------------------------------
+2.6  DECISION — restrict to Source2
+--------------------------------------------------------------------------------
+WHAT "GRADED DIFFERENTLY" MEANS
+          Severity is not measured by an instrument. Someone at the reporting
+          provider decides where the line falls between minor and serious
+          delay. Each provider draws that line in a different place, and some
+          moved it over time.
+
+          Source2 draws it in a place that puts 33.92% of its accidents in the
+          severe category, against 19.5% for the dataset as a whole. So Source2
+          applies the severe label MORE readily. Not an error — a different
+          convention.
+
+WHY THEY CANNOT BE MIXED
+          If Source1 calls 33% severe in 2018 and 2.7% in 2022, the word
+          "severe" means two different things inside one column. Any feature
+          correlated with source or year then picks up that meaningless signal
+          and looks predictive when it is not.
+
+WHY SOURCE2
+          The only source whose rate holds steady across its whole window.
+          3,305,373 rows = 43% of the dataset, far more than needed.
+          Only one source remains, so source can no longer confound anything.
+
+CONSEQUENCE
+          New baseline: 33.92% severe. Everything computed before this point
+          has to be re-run.
+
+NOT PERMANENT
+          Later options: re-test the main findings on Source1's own stable
+          window (2016-2018) as a robustness check; or use all three with
+          source and year as explicit controls.
+
+
+--------------------------------------------------------------------------------
+2.7  Coverage check — what the restriction cost
+--------------------------------------------------------------------------------
+TESTED    State counts, year counts, road-type mix and missingness, Source2 vs
+          the full dataset.
+
+RESULT (a) GEOGRAPHY — all states present but nine effectively absent:
+              SD 12 rows, ND 18, MT 56, WY 202, ID 229, WV 442, ME 477,
+              VT 554, AR 1,406. All rural, mostly northern.
+
+RESULT (b) TIME — Source2 covers 2016-2022, no 2023 at all.
+              Its share of each year: 2016 68%, 2018 80%, 2020 38%, 2022 12%.
+              So the retained data skews toward the earlier years.
+
+RESULT (c) ROAD MIX — Local 51.3% in Source2 vs 44.4% in the full dataset.
+              Interstate 21.7% vs 25.1%.
+
+MEANING   Source2 has proportionally MORE local-road accidents, not fewer. That
+          rules out an alternative explanation: Source2's 80.4% interstate
+          severity is NOT because it is a highway-focused feed. It genuinely
+          applies the severe label more readily across every road type. Which
+          is also why the baseline is 33.92% rather than 19.5%.
+
+RESULT (d) MISSINGNESS — worse in Source2 for two columns:
+              precipitation  28.5% -> 47.0%
+              wind_chill     25.9% -> 43.6%
+              wind_speed      7.4% -> 10.8%
+              light columns   0.30% -> 0.05%  (better)
+              The 23,246 all-missing rows are almost entirely OUTSIDE Source2 —
+              only 1,541 remain.
+
+RESULT (e) end_lat and end_lng are 100% MISSING in Source2 — all 3,305,373
+              rows. They only ever existed for Sources 1 and 3.
+
+MEANING   precipitation at 47% missing is now a serious Stage 3 problem.
+          The end coordinates do not matter — they were leakage anyway — but it
+          means distance(mi) for Source2 rows must be derived some other way.
+
+NEXT      Re-run weather on Source2 and see whether the restriction worked.
+
+
+--------------------------------------------------------------------------------
+2.8  Weather, second attempt (Source2) — THE VALIDATION
+--------------------------------------------------------------------------------
+TESTED    Identical keyword test, Source2 only.
+
+RESULT    Pair (same weather)   Full dataset   Source2
+          clear vs fair         21.8 points    4.6 points
+          overcast vs cloudy    15.1 points    0.4 points
+
+MEANING   Synonyms now agree. The instrument is reading consistently, so
+          differences between genuinely different weathers can be trusted.
+          This is the proof that the Source2 decision was correct.
+
+          The residual 4.6 points is explained: Source2 also spans the 2019
+          switchover, and its own rate dipped from 36.8 to 30.3 around then.
+
+RESULT    Against the 33.92% baseline:
+              snow     44.23  (+10.3)
+              rain     40.01   (+6.1)
+              haze     37.79   (+3.9)
+              overcast 34.93   (+1.0)  no effect
+              cloud    34.48   (+0.6)  no effect
+              clear    34.00   (+0.1)  no effect
+              fair     29.42   (-4.5)
+              fog      23.57  (-10.4)
+
+MEANING   Snow and rain raise severity. Cloud cover does nothing, which makes
+          sense — whether the sky is grey has no bearing on how a road behaves.
+
+          Note how badly the blended data misled: it reported snow at 20.04%,
+          meaning no effect. The true figure within a consistent source is
+          44.23%, the largest weather effect there is.
+
+
+--------------------------------------------------------------------------------
+2.9  street_type
+--------------------------------------------------------------------------------
+TESTED    % severe per road class, both datasets.
+
+RESULT (Source2)   Local          14.67
+                   County Road    17.60 approx
+                   State Highway  23.73
+                   US Highway     30.79
+                   Other          36.84
+                   Freeway        43.53
+                   Unknown        49.72
+                   Interstate     80.40
+
+MEANING   A 66-point spread. The strongest single column in the dataset by a
+          wide margin.
+
+          It makes physical sense. A crash on a local street blocks one lane of
+          a road with alternatives, at low speed. A crash on an interstate
+          blocks a high-speed road with no way around it, so traffic backs up
+          for miles. Severity measures disruption, so road class should
+          dominate — and it does.
+
+CONSEQUENCE
+          Because it is this strong, any other column associated with road
+          class will LOOK predictive when it is really just pointing at the
+          road. street_type therefore becomes the column to SPLIT BY when
+          testing everything else.
+
+NOTE      "Unknown" at 49.72% sits between Freeway and Interstate, which is
+          suspicious — unparsed street names behaving like major roads suggests
+          street_type_shift is missing some highway naming patterns.
+
+
+--------------------------------------------------------------------------------
+2.10  The twelve boolean road features — raw comparison
+--------------------------------------------------------------------------------
+TESTED    % severe when True vs when False, Source2.
+
+RESULT    roundabout      33.93 / 2.40      down hard
+          stop            34.87 / 5.24      down hard
+          amenity         34.35 / 5.33      down hard
+          crossing        38.39 / 7.35      down hard
+          traffic_signal  40.98 / 9.25      down hard
+          station         34.57 / 10.07     down hard
+          no_exit         33.98 / 14.00     down
+          bump            33.93 / 19.45     down
+          give_way        34.03 / 18.29     down
+          railway         34.05 / 20.94     down
+          traffic_calming 33.94 / 21.63     down
+          junction        32.64 / 58.10     UP hard
+
+MEANING   Eleven of twelve point the same way, and every False value sits at
+          roughly 34% — the baseline. That uniformity is the tell.
+
+          Roundabouts, stop signs, crossings, traffic lights, speed bumps and
+          shops are all things found on LOCAL streets, and local streets are at
+          14.67%. So it is possible none of these features does anything, and
+          the entire pattern is "these things mark local roads".
+
+NEXT      Test that directly.
+
+
+--------------------------------------------------------------------------------
+2.11  The split — traffic_signal by street_type (test case)
+--------------------------------------------------------------------------------
+TESTED    traffic_signal True vs False, inside each road type, Source2.
+          Chosen as the test case because it has the most rows and one of the
+          biggest raw gaps.
+
+RESULT    Road type        No signal   Signal   Gap
+          Unknown            50.70     19.61    31.1
+          Other              43.56     11.25    32.3
+          Freeway            46.95     19.89    27.1
+          State Highway      26.04      6.76    19.3
+          US Highway         32.67     17.53    15.1
+          Local              19.47      5.77    13.7
+          Interstate         80.36     81.62     1.3
+
+MEANING   The gap SURVIVES in every road type except Interstate. Both sides of
+          each comparison are on the same road class, so road class cannot be
+          causing it. The effect is real.
+
+          Note this is the OPPOSITE conclusion from the full dataset, where the
+          gap shrank from 11.7 to 4.8 points. Another finding the blended
+          sources had distorted.
+
+          Interstate collapses to 1.3 points with both sides near 81% —
+          saturation. No room left for anything else to matter.
+
+NEXT      If it works for traffic_signal, run it for the other eleven.
+
+
+--------------------------------------------------------------------------------
+2.12  The split — all twelve features
+--------------------------------------------------------------------------------
+TESTED    Same split for every boolean. Read within Local roads (most rows,
+          baseline 14.67%).
+
+RESULT    Feature           Local False -> True     Verdict
+          traffic_signal      19.47 -> 5.77         REAL
+          crossing            17.88 -> 4.66         REAL
+          stop                15.32 -> 2.95         REAL
+          amenity             14.99 -> 2.98         REAL
+          roundabout          14.68 -> 2.65         REAL (but see 2.16)
+          station             15.14 -> 4.81         REAL
+          railway             14.77 -> 8.23         weak, reverses on freeway
+          no_exit             14.71 -> 7.34         weak, reverses on freeway
+          bump                14.67 -> 14.46        DEAD
+          give_way            14.68 -> 14.55        DEAD
+          traffic_calming     14.67 -> 18.24        REVERSES direction
+          junction            14.05 -> 56.07        REAL, opposite direction
+
+MEANING — THE SURVIVORS
+          Six features keep a gap of 10+ points with road class held fixed. All
+          six mark places where traffic is already slow and constrained — a
+          light, a crossing, a stop sign, a roundabout, a shopping street, a
+          bus stop. A crash there happens at low speed and blocks a short
+          stretch. Severity measures disruption, so the outcome scores low.
+
+MEANING — THE FAILURES
+          give_way raw: 18.29 True vs 34.03 False, a 16-point gap.
+          give_way within Local: 14.55 vs 14.68. Nothing.
+
+          In the raw comparison the True group was almost all local-road
+          accidents and the False group contained all the motorway accidents.
+          It was never about give-way signs. It was local roads against
+          motorways wearing a different label. bump behaves identically.
+
+MEANING — THE REVERSAL
+          traffic_calming looked protective raw (21.63 vs 33.94) but RAISES
+          severity within local roads (18.24 vs 14.67). The direction flips,
+          so the raw result was not merely inflated — it pointed the wrong way.
+
+MEANING — JUNCTION
+          Four times the rate on local roads. The largest single effect found
+          anywhere in the analysis.
+
+MEANING — INTERSTATE SATURATION
+          Every one of the twelve leaves Interstate between 74% and 92% against
+          an 80.40% baseline. Once an accident is on an interstate, nothing
+          else moves the outcome. For interstate accidents, road class alone is
+          effectively the whole prediction.
+
+NEXT      Two questions raised: are the six survivors duplicates of each other,
+          and is junction really slip roads?
+
+
+--------------------------------------------------------------------------------
+2.13  light_score
+--------------------------------------------------------------------------------
+TESTED    Raw, then split by street_type.
+
+RESULT (raw, Source2)   0 (day) 33.10   1 31.59   2 33.20   3 35.30
+                        4 (full night) 40.17
+
+RESULT (split)   Road type       Day    Night   Change
+                 Local          14.05   19.48   +5.4
+                 Freeway        42.31   50.41   +8.1
+                 Other          36.25   42.75   +6.5
+                 State Highway  23.82   24.54   +0.7
+                 Interstate     80.85   82.36   +1.5
+                 US Highway     31.53   28.23   -3.3
+
+MEANING   Survives the split on local roads and freeways, so darkness genuinely
+          matters. But modest — 5 to 8 points against street_type's 66.
+
+          NOT A LADDER. Scores 1, 2 and 3 all sit at or below the daylight
+          rate. Only score 4 jumps. The column is effectively a yes/no
+          question: was it fully dark?
+
+STAGE 3   Replace with a single is_night flag:
+          ACTION      light_score 0,1,2,3 -> 0
+                      light_score 4       -> 1
+
+NOTE      On the full dataset light_score 4 showed 17.98% — the LOWEST level,
+          i.e. night appeared safest. Reversed. Another blended-source artifact.
+
+
+--------------------------------------------------------------------------------
+2.14  start_hour
+--------------------------------------------------------------------------------
+TESTED    Raw, then split by street_type, with row counts.
+
+RESULT (raw)   Full dataset: night LOWEST (14.15% at 01:00)
+               Source2:      night HIGHEST (47.72% at 00:00), 08:00 lowest
+                             at 25.00%
+               Direction completely reversed.
+
+RESULT (split, Source2, Local only)
+               08:00  10.30%
+               01:00  30.05%
+               Three times the rate inside one road type.
+               Freeway: 32.6 at 07:00 to 57.2 at 00:00
