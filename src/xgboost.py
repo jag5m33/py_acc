@@ -17,7 +17,7 @@ class Xgboost:
                                   random_state = 42)
     def train(self):
         print("training model for binary classification")
-        self.model.fit(self.x_train, y_train)
+        self.model.fit(self.x_train,self.y_train)
         print(f" number of trees across full model: {len(self.model.get_booster().get_dump())}")
 
     def _score(self, x, y, name):
@@ -37,7 +37,7 @@ class Xgboost:
 
         #name - train, test, val etc.
         print(f"{name:<10} acc {scores['accuracy']:.4f} | "
-              f"prec {scores['precision']:.4f} | rec {scores['recall']:.4f} | "
+              f"precision {scores['precision']:.4f} | recall {scores['recall']:.4f} | "
               f"F1 {scores['f1']:.4f} | PR-AUC {scores['pr_auc']:.4f} | "
               f"predicted severe {scores['pred_rate']:.3f} vs actual {scores['true_rate']:.3f}")
 
@@ -65,5 +65,5 @@ class Xgboost:
         plt.grid(alpha=0.3)
         plt.show()
 
-        return precision, recall, thresholds # # thresholds lets you pick an operating point other than 0.5
+        return precision, recall, thresholds # thresholds lets you pick an operating point other than 0.5
     
