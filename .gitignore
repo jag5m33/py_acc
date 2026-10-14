@@ -1,0 +1,10 @@
+@"
+data/
+venv/
+__pycache__/
+*.parquet
+*.csv
+*.keras
+*.dll
+.DS_Store
+"@ | Out-File -Encoding utf8 .gitignore
