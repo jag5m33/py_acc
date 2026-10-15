@@ -9,4 +9,4 @@ R - Root out anomalies
 E - engineer and transform 
 D - Document and decide
 
-![Overview dashboard](dashboard_viz/overview.png)
+![Overview dashboard](dashboard_viz/page_1_us_acc_overview.png)
