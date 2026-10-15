@@ -1,6 +1,7 @@
 @"
 data/
 venv/
+vault/
 __pycache__/
 *.parquet
 *.csv

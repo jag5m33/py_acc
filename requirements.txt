@@ -66,3 +66,6 @@ wcwidth==0.8.2
 pyarrow>=15.0.0
 fastparquet>=2024.0.0
 plotly>=7.1.0
+xgboost>=3.4.1
+
+
