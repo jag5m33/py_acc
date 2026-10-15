@@ -8,3 +8,5 @@ O - Observe relationships
 R - Root out anomalies 
 E - engineer and transform 
 D - Document and decide
+
+![Overview dashboard](dashboard_viz/overview.png)
